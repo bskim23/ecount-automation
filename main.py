@@ -1,4 +1,4 @@
-APP_REV = "2026-02-24_22"
+APP_REV = "2026-02-24_23"
 
 from flask import Flask, request, jsonify
 import os, json, base64, re, datetime
@@ -276,14 +276,21 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
 
             if excel_ctx is not None:
                 try:
-                    with page.expect_download(timeout=30000) as dlinfo:  # ★ 30초로 축소
+                    print("[ERP] clicking Excel button...", flush=True)
+                    with page.expect_download(timeout=30000) as dlinfo:
                         excel_ctx.locator(EXCEL_SEL).first.click(timeout=5000, force=True)
+                    print("[ERP] download started, getting value...", flush=True)
                     download = dlinfo.value
+                    print(f"[ERP] download value obtained: {download.suggested_filename}", flush=True)
                     excel_clicked = True
                 except Exception as e:
                     result["excel_click_error"] = repr(e)
+                    print(f"[ERP] excel click/download error: {repr(e)}", flush=True)
+            else:
+                print("[ERP] excel_ctx is None, skipping click", flush=True)
 
             ok_steps["ExcelClick"] = excel_clicked
+            print(f"[ERP] ExcelClick={excel_clicked}", flush=True)
 
             if not excel_clicked:
                 browser.close()
