@@ -1,4 +1,4 @@
-APP_REV = "2026-02-24_24"
+APP_REV = "2026-02-24_25"
 
 from flask import Flask, request, jsonify
 import os, json, base64, re, datetime
@@ -128,20 +128,7 @@ EXPECTED_HEADERS = [
     "부가세", "합계", "거래처명", "적요", "거래처계층그룹명",
 ]
 
-# ★ Excel 버튼 셀렉터 후보 목록
-EXCEL_SELECTORS = [
-    "[data-item-key='excel_view_footer_toolbar']",
-    "[data-item-key='excel_view']",
-    "[data-item-key*='excel']",
-    "[title='Excel(화면)']",
-    "[onclick*='excel']",
-    "button:has-text('Excel(화면)')",
-    "a:has-text('Excel(화면)')",
-    "span:has-text('Excel(화면)')",
-    "li:has-text('Excel(화면)')",
-    "td:has-text('Excel(화면)')",
-    "text=Excel(화면)",
-]
+EXCEL_SEL = "[data-item-key='excel_view_footer_toolbar']"
 
 def detect_month_key_from_rows(rows: List[List[Any]]) -> str:
     for r in rows:
@@ -154,13 +141,69 @@ def detect_month_key_from_rows(rows: List[List[Any]]) -> str:
     now = datetime.datetime.now()
     return f"{now.year:04d}/{now.month:02d}"
 
+
+def read_xlsx_rows(path: str) -> Tuple[List[List[Any]], str]:
+    """
+    엑셀 파일에서 판매현황 시트의 데이터 행을 읽어 반환.
+    ★ read_only=True + iter_rows(values_only=True) 로 랜덤 접근 없이 스트리밍 처리.
+    반환: (rows, month_key)
+    """
+    from openpyxl import load_workbook
+
+    wb = load_workbook(path, data_only=True, read_only=True)
+
+    if "판매현황" not in wb.sheetnames:
+        raise RuntimeError(f"sheet '판매현황' not found: {wb.sheetnames}")
+
+    ws = wb["판매현황"]
+
+    # 헤더 검증 (row 1 = 회사명 메타, row 2 = 컬럼헤더)
+    # read_only iter_rows로 앞 2행만 확인
+    meta_row = None
+    header_row = None
+    for i, row in enumerate(ws.iter_rows(min_row=1, max_row=2, min_col=1, max_col=10, values_only=True)):
+        if i == 0:
+            meta_row = row
+        else:
+            header_row = list(row)
+
+    a1 = meta_row[0] if meta_row else None
+    if not isinstance(a1, str) or "회사명" not in a1:
+        raise RuntimeError(f"A1 meta pattern not found: {a1!r}")
+
+    if header_row != EXPECTED_HEADERS:
+        raise RuntimeError(f"header mismatch: {header_row}")
+
+    # 데이터 행 전체 읽기 (row 3~끝)
+    # iter_rows는 스트리밍이므로 한 번에 리스트로 수집
+    all_rows = [
+        list(r)
+        for r in ws.iter_rows(min_row=3, min_col=1, max_col=10, values_only=True)
+    ]
+
+    # 뒤에서 빈 행 제거
+    while all_rows and all_rows[-1][0] in (None, ""):
+        all_rows.pop()
+
+    # 마지막 3행은 합계/소계 행 → 제외
+    rows = all_rows[:-3] if len(all_rows) > 3 else []
+
+    if not rows:
+        raise RuntimeError("no data rows after excluding last 3 summary rows")
+
+    month_key = detect_month_key_from_rows(rows)
+
+    wb.close()
+    return rows, month_key
+
+
 def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
     if not PLAYWRIGHT_IMPORT_OK:
         return False, {"error": "Playwright import failed"}
 
-    com_code = get_env("COM_CODE").strip()
-    user_id  = get_env("USER_ID").strip()
-    user_pw  = get_env("USER_PW").strip()
+    com_code  = get_env("COM_CODE").strip()
+    user_id   = get_env("USER_ID").strip()
+    user_pw   = get_env("USER_PW").strip()
     login_url = get_env("ECOUNT_LOGIN_URL", "https://login.ecount.com/Login/").strip()
     dl_dir    = get_env("DOWNLOAD_DIR", "/tmp").strip() or "/tmp"
 
@@ -168,11 +211,6 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
         "login_url": login_url,
         "download_dir": dl_dir,
     }
-
-    try:
-        from openpyxl import load_workbook
-    except Exception as e:
-        return False, {"error": f"openpyxl import failed: {repr(e)}"}
 
     try:
         print("[ERP] launching playwright...", flush=True)
@@ -188,7 +226,7 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
             page.set_default_timeout(30000)
             page.set_default_navigation_timeout(30000)
 
-            # 1) 로그인 ── _12 그대로
+            # 1) 로그인
             print(f"[ERP] goto {login_url}", flush=True)
             page.goto(login_url, wait_until="commit", timeout=30000)
             page.wait_for_timeout(3000)
@@ -207,7 +245,7 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
             result["url_after_login"] = page.url
             print(f"[ERP] login done url={page.url}", flush=True)
 
-            # 2) 메뉴 클릭 ── _12 그대로
+            # 2) 메뉴 클릭
             def click_text(txt: str) -> bool:
                 for ctx in [page] + page.frames:
                     try:
@@ -236,22 +274,25 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
 
             ok_steps = {}
             result["frame_count"] = len(page.frames)
+
             print("[ERP] clicking 재고I...", flush=True)
             ok_steps["재고I"] = click_menu("link_depth1_MENUTREE_000004", "재고 I")
             result["steps"] = ok_steps
             page.wait_for_timeout(2000)
+
             print("[ERP] clicking 판매현황...", flush=True)
             ok_steps["판매현황"] = click_menu("link_depth4_MENUTREE_000494", "판매현황")
             page.wait_for_timeout(2000)
+
             print("[ERP] clicking SAT...", flush=True)
             ok_steps["SAT"] = click_text("SAT")
             page.wait_for_timeout(1500)
+
             print("[ERP] clicking 금월(~오늘)...", flush=True)
             ok_steps["금월(~오늘)"] = click_text("금월(~오늘)")
 
-            # ★ JS 렌더링 완료 대기: 버튼이 DOM에 나타날 때까지 최대 15초 폴링
+            # Excel 버튼이 DOM에 나타날 때까지 최대 15초 폴링
             print("[ERP] polling for Excel button (max 15s)...", flush=True)
-            EXCEL_SEL = "[data-item-key='excel_view_footer_toolbar']"
             excel_ctx = None
             for i in range(30):  # 0.5s × 30 = 15s
                 page.wait_for_timeout(500)
@@ -304,36 +345,15 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
             print("[ERP] save_as done", flush=True)
             result["downloaded_file"] = save_path
 
-            # 4) 엑셀 검증 ── _12 그대로
-            print("[ERP] loading workbook...", flush=True)
-            wb = load_workbook(save_path, data_only=False, read_only=True)
-            print(f"[ERP] workbook loaded, sheets={wb.sheetnames}", flush=True)
-            if "판매현황" not in wb.sheetnames:
-                raise RuntimeError(f"sheet '판매현황' not found: {wb.sheetnames}")
-
-            ws = wb["판매현황"]
-            a1 = ws["A1"].value
-            if not isinstance(a1, str) or "회사명" not in a1:
-                raise RuntimeError("A1 meta pattern not found")
-
-            headers = [ws.cell(row=2, column=c).value for c in range(1, 11)]
-            if headers != EXPECTED_HEADERS:
-                raise RuntimeError(f"header mismatch: {headers}")
-
-            last = ws.max_row
-            while last >= 3 and (ws.cell(row=last, column=1).value in (None, "")):
-                last -= 1
-            data_end = last - 3
-            if data_end < 3:
-                raise RuntimeError("no data rows after excluding last 3 rows")
-
-            rows = []
-            for r in range(3, data_end + 1):
-                rows.append([ws.cell(row=r, column=c).value for c in range(1, 11)])
-
-            result["row_count"] = len(rows)
-            result["month_key"] = detect_month_key_from_rows(rows)
             browser.close()
+
+        # 4) 엑셀 검증 ── 브라우저 닫은 뒤 처리 (iter_rows 스트리밍)
+        print("[ERP] loading workbook (iter_rows)...", flush=True)
+        rows, month_key = read_xlsx_rows(save_path)
+        print(f"[ERP] workbook parsed: {len(rows)} rows, month={month_key}", flush=True)
+
+        result["row_count"] = len(rows)
+        result["month_key"] = month_key
 
         return True, result
 
@@ -341,6 +361,7 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
         return False, {"error": f"Playwright timeout: {repr(e)}", "partial": result}
     except Exception as e:
         return False, {"error": f"ERP stage failed: {repr(e)}", "partial": result}
+
 
 def stage_erp() -> Dict[str, Any]:
     ok, payload = ecount_download_and_validate()
@@ -386,16 +407,9 @@ def stage_all() -> Dict[str, Any]:
     month_key       = erp_payload.get("month_key", "")
     downloaded_file = erp_payload.get("downloaded_file", "")
 
-    from openpyxl import load_workbook
-    wb = load_workbook(downloaded_file, data_only=False, read_only=True)
-    src = wb["판매현황"]
-    last = src.max_row
-    while last >= 3 and (src.cell(row=last, column=1).value in (None, "")):
-        last -= 1
-    data_end = last - 3
-    rows = []
-    for r in range(3, data_end + 1):
-        rows.append([src.cell(row=r, column=c).value for c in range(1, 11)])
+    # ★ read_xlsx_rows 재사용 (이미 validate에서 검증 완료)
+    print("[ALL] re-reading xlsx rows for sheet update...", flush=True)
+    rows, _ = read_xlsx_rows(downloaded_file)
     inserted = len(rows)
 
     values = ws.get_all_values()
@@ -435,6 +449,7 @@ def stage_all() -> Dict[str, Any]:
         "timestamp": now_kst_str(),
     }
 
+
 @app.route("/", methods=["GET"])
 def health():
     return f"OK | {APP_REV}", 200
@@ -472,6 +487,7 @@ def run_job():
         return jsonify(res), (200 if res["ok"] else 500)
 
     return jsonify({"ok": False, "error": f"unknown stage: {stage}"}), 400
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
