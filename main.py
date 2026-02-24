@@ -1,4 +1,4 @@
-APP_REV = "2026-02-24_05"
+APP_REV = "2026-02-24_06"
 
 from flask import Flask, request, jsonify
 import os, json, base64, re, datetime
