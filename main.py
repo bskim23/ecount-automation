@@ -1,4 +1,4 @@
-APP_REV = "2026-02-24_09"
+APP_REV = "2026-02-24_10"
 
 from flask import Flask, request, jsonify
 import os, json, base64, re, datetime
@@ -194,6 +194,10 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
                         if loc.count() > 0:
                             loc.first.click(timeout=5000, force=True)
                             return True
+                        loc2 = ctx.locator(f"span:has-text('{txt}')")
+                        if loc2.count() > 0:
+                            loc2.first.click(timeout=5000, force=True)
+                            return True
                     except Exception:
                         continue
                 return False
@@ -221,12 +225,22 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
             ok_steps["금월(~오늘)"] = click_text("금월(~오늘)")
             page.wait_for_timeout(1500)
 
-            # 3) Excel(화면) 클릭 후 다운로드
+            # 3) Excel(화면) 클릭
             excel_clicked = False
             for label in ["Excel(화면)", "엑셀(화면)"]:
                 if click_text(label):
                     excel_clicked = True
                     break
+            if not excel_clicked:
+                for ctx in [page] + page.frames:
+                    try:
+                        loc = ctx.locator("span").filter(has_text="Excel")
+                        if loc.count() > 0:
+                            loc.first.click(timeout=5000, force=True)
+                            excel_clicked = True
+                            break
+                    except Exception:
+                        continue
 
             ok_steps["ExcelClick"] = excel_clicked
             if not excel_clicked:
