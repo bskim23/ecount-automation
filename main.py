@@ -1,385 +1,417 @@
-# app.py
-# -----------------------------------------------------------------------------
-# ✅ Ecount ERP Automation (Cloud Run / Playwright)
-# - 핵심 수정: "리다이렉트(wait_for_url)"가 아니라
-#   (1) 현재 URL에 loginca 도메인 포함 여부 + (2) ERP 메뉴/요소 등장 여부로 로그인 성공 판정
-# - /run?stage=erp 로 호출
-# -----------------------------------------------------------------------------
+APP_REV = "2026-02-24_08"
 
-import os
-import json
-import base64
-import traceback
-from datetime import datetime, timezone, timedelta
+from flask import Flask, request, jsonify
+import os, json, base64, re, datetime
+from typing import Dict, Any, Tuple, List
 
-from flask import Flask, jsonify, request
+import gspread
+from google.oauth2.service_account import Credentials
 
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
+try:
+    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
+    PLAYWRIGHT_IMPORT_OK = True
+except Exception:
+    PLAYWRIGHT_IMPORT_OK = False
 
-APP_REV = os.environ.get("APP_REV", "2026-02-24_erp_login_fix_v1")
-
-# =========================
-# Flask
-# =========================
 app = Flask(__name__)
 
-# =========================
-# Helpers
-# =========================
 def now_kst_str() -> str:
-    kst = timezone(timedelta(hours=9))
-    return datetime.now(tz=kst).strftime("%Y-%m-%d %H:%M:%S%z")
+    kst = datetime.timezone(datetime.timedelta(hours=9))
+    return datetime.datetime.now(tz=kst).strftime("%Y-%m-%d %H:%M:%S%z")
 
-def safe_b64_png(page) -> str:
-    try:
-        png = page.screenshot(full_page=True)
-        return base64.b64encode(png).decode("utf-8")
-    except Exception:
+def mask(s: str, keep: int = 2) -> str:
+    if s is None:
         return ""
+    s = str(s)
+    if len(s) <= keep:
+        return "*" * len(s)
+    return s[:keep] + "*" * (len(s) - keep)
 
-def tail_console(page, max_items=80):
-    items = getattr(page, "_console_tail", [])
-    return items[-max_items:]
+def get_env(name: str, default: str = "") -> str:
+    v = os.environ.get(name, default)
+    return v if v is not None else default
 
-def bind_console_tail(page):
-    page._console_tail = []
-    def _on_console(msg):
-        try:
-            page._console_tail.append({"type": msg.type, "text": msg.text})
-        except Exception:
-            pass
-    page.on("console", _on_console)
-
-def dump_cookies(context, max_items=12):
+def parse_service_account_from_env() -> Dict[str, Any]:
+    raw = get_env("GOOGLE_SERVICE_ACCOUNT_JSON").strip()
+    if not raw:
+        raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON is empty")
+    if raw.startswith("{") and raw.endswith("}"):
+        return json.loads(raw)
     try:
-        cookies = context.cookies()
-        sample = cookies[:max_items]
-        for c in sample:
-            if "value" in c and isinstance(c["value"], str) and len(c["value"]) > 120:
-                c["value"] = c["value"][:120] + "...(truncated)"
-        return {"cookie_count": len(cookies), "cookies_sample": sample}
+        decoded = base64.b64decode(raw).decode("utf-8").strip()
+        if decoded.startswith("{") and decoded.endswith("}"):
+            return json.loads(decoded)
     except Exception:
-        return {"cookie_count": 0, "cookies_sample": []}
+        pass
+    return json.loads(raw)
 
-def attach_debug(result, page, stage, extra=None, context=None):
-    result.setdefault("debug", {})
-    payload = {
-        "stage": stage,
-        "timestamp": now_kst_str(),
-        "page_url": getattr(page, "url", ""),
-        "screenshot_b64": safe_b64_png(page),
-        "console_tail": tail_console(page),
-    }
-    if context is not None:
-        payload.update(dump_cookies(context))
-    if extra:
-        payload.update(extra)
-    result["debug"][stage] = payload
-
-def collect_login_error_text(page) -> str:
-    # 로그인 실패/경고 문구가 화면에 있으면 잡아냄 (없으면 빈 문자열)
-    candidates = [
-        "div.msg",
-        "div.error",
-        "p.error",
-        "span.error",
-        "div.alert",
-        "div#msg",
-        "div#message",
+def gspread_client() -> gspread.Client:
+    info = parse_service_account_from_env()
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
     ]
-    texts = []
-    for sel in candidates:
-        try:
-            loc = page.locator(sel)
-            if loc.count() > 0:
-                for i in range(min(loc.count(), 5)):
-                    t = (loc.nth(i).inner_text() or "").strip()
-                    if t:
-                        texts.append(t)
-        except Exception:
-            pass
-    # 중복 제거
-    uniq = []
-    for t in texts:
-        if t not in uniq:
-            uniq.append(t)
-    return " | ".join(uniq)
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
+    return gspread.authorize(creds)
 
-def frame_locator_counts(page, selector_map):
-    frames_info = []
-    for i, fr in enumerate(page.frames):
-        info = {"i": i, "name": fr.name, "url": fr.url, "readyState": ""}
-        try:
-            info["readyState"] = fr.evaluate("document.readyState")
-        except Exception:
-            info["readyState"] = "unknown"
-        counts = {}
-        for k, sel in selector_map.items():
-            try:
-                counts[k] = fr.locator(sel).count()
-            except Exception:
-                counts[k] = 0
-        info["selector_counts"] = counts
-        frames_info.append(info)
-    return frames_info
+def open_target_worksheet(gc: gspread.Client):
+    sheet_id = get_env("GOOGLE_SHEET_ID").strip()
+    sheet_name = get_env("SHEET_NAME", "SAT Raw").strip()
+    if not sheet_id:
+        raise ValueError("GOOGLE_SHEET_ID is empty")
+    if not sheet_name:
+        raise ValueError("SHEET_NAME is empty")
+    sh = gc.open_by_key(sheet_id)
+    ws = sh.worksheet(sheet_name)
+    return sh, ws
 
-# =========================
-# Ecount selectors (예시)
-# =========================
-SELECTOR_MAP = {
-    # login page
-    "login_com": 'input[name="com_code"], input#com_code, input[name="company"], input#company',
-    "login_id": 'input[name="user_id"], input#user_id, input[name="id"], input#id',
-    "login_pw": 'input[name="user_pw"], input#user_pw, input[type="password"]',
-    # ERP menu (재고 I) - 사용자 로그에 있던 inv count=1 기준
-    "inv": 'a#link_depth1_MENUTREE_000004',
-    # (필요시) 판매관리/매출현황 등
-    "sales_mgmt": 'a#link_depth1_MENUTREE_000001, a#link_depth1_MENUTREE_000002',
-    "sales_status": 'a:has-text("매출현황"), a:has-text("Sales")',
-    # 엑셀 버튼/기간 등 (환경에 따라 추가)
-    "excel_btn": 'button:has-text("엑셀"), a:has-text("엑셀"), button:has-text("Excel"), a:has-text("Excel")',
-    "range_span": 'span:has-text("기간"), span:has-text("Range")',
-}
+def ensure_log_worksheet(sh) -> Any:
+    log_name = get_env("LOG_SHEET_NAME", "Run Log").strip() or "Run Log"
+    try:
+        return sh.worksheet(log_name)
+    except Exception:
+        return sh.add_worksheet(title=log_name, rows=2000, cols=10)
 
-# =========================
-# 핵심: ERP 준비 완료 판정
-# =========================
-def wait_until_erp_ready(page, timeout_ms=60000, selector_map=None):
-    """
-    ✅ wait_for_url 대신:
-    1) page.url에 loginca.ecount.com 포함 여부
-    2) ERP 좌측 메뉴(예: 재고 I)가 어떤 frame에서든 등장하는지
-    """
-    import time
-    selector_map = selector_map or {}
-    deadline = time.time() + (timeout_ms / 1000)
+def append_log_row(log_ws, stage: str, status: str, detail: str):
+    log_ws.append_row(
+        [now_kst_str(), stage, status, detail],
+        value_input_option="USER_ENTERED"
+    )
 
-    last = {"url": page.url, "reason": "init"}
-
-    while time.time() < deadline:
-        url = page.url or ""
-        last["url"] = url
-
-        if "loginca.ecount.com" in url or "ecount.com/ec5/view/erp" in url:
-            # frames 스캔
-            try:
-                frames = frame_locator_counts(page, selector_map)
-                last["frames"] = frames
-
-                # inv(재고 I) 또는 ERP를 의미하는 메뉴가 잡히면 OK
-                for fr in page.frames:
-                    try:
-                        if selector_map.get("inv") and fr.locator(selector_map["inv"]).count() > 0:
-                            return True, {"url": url, "reason": "erp_menu_found", "frames_state": frames}
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-            page.wait_for_timeout(300)
-            continue
-
-        # 아직 login 도메인/중간 페이지라면 잠깐 대기
-        page.wait_for_timeout(300)
-        last["reason"] = "waiting_domain"
-
-    last["reason"] = "timeout_wait_erp_ready"
-    return False, last
-
-# =========================
-# ERP Stage
-# =========================
-def run_stage_erp():
-    """
-    환경변수:
-      - ECOUNT_COM_CODE
-      - ECOUNT_USER_ID
-      - ECOUNT_USER_PW
-    """
-    com_code = os.environ.get("ECOUNT_COM_CODE", "").strip()
-    user_id = os.environ.get("ECOUNT_USER_ID", "").strip()
-    user_pw = os.environ.get("ECOUNT_USER_PW", "").strip()
-
-    if not (com_code and user_id and user_pw):
-        return False, {
-            "error": "Missing env vars",
-            "need": ["ECOUNT_COM_CODE", "ECOUNT_USER_ID", "ECOUNT_USER_PW"],
-        }
-
-    result = {
-        "app_rev": APP_REV,
+def stage_env() -> Dict[str, Any]:
+    required = [
+        "GOOGLE_SHEET_ID", "SHEET_NAME", "GOOGLE_SERVICE_ACCOUNT_JSON",
+        "COM_CODE", "USER_ID", "USER_PW",
+    ]
+    present = {}
+    missing = []
+    for k in required:
+        v = get_env(k)
+        if not v:
+            missing.append(k)
+            present[k] = {"present": False, "preview": ""}
+        else:
+            if k == "USER_PW":
+                preview = mask(v, keep=1)
+            elif k == "GOOGLE_SERVICE_ACCOUNT_JSON":
+                preview = f"len={len(v)}"
+            elif k == "GOOGLE_SHEET_ID":
+                preview = v[:10] + "..."
+            else:
+                preview = v
+            present[k] = {"present": True, "preview": preview}
+    return {
+        "stage": "env",
+        "ok": len(missing) == 0,
+        "missing": missing,
+        "present": present,
         "timestamp": now_kst_str(),
-        "steps": {},
-        "debug": {},
     }
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-            ],
-        )
+def stage_gsheet() -> Dict[str, Any]:
+    gc = gspread_client()
+    sh, ws = open_target_worksheet(gc)
+    log_ws = ensure_log_worksheet(sh)
+    detail = f"target={ws.title}, sheet_id={sh.id}"
+    append_log_row(log_ws, "gsheet", "OK", detail)
+    return {
+        "stage": "gsheet",
+        "ok": True,
+        "message": "Google Sheet write test OK (logged to Run Log)",
+        "target_sheet": ws.title,
+        "log_sheet": log_ws.title,
+        "timestamp": now_kst_str(),
+    }
 
-        context = browser.new_context(
-            locale="ko-KR",
-            viewport={"width": 1920, "height": 1080},
-        )
-        page = context.new_page()
-        bind_console_tail(page)
+EXPECTED_HEADERS = [
+    "일자-No.", "품목명(규격)", "수량", "단가", "공급가액",
+    "부가세", "합계", "거래처명", "적요", "거래처계층그룹명",
+]
 
-        try:
-            # 1) 로그인 페이지
-            login_url = "https://login.ecount.com/"
-            page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
-            attach_debug(result, page, "login_page_loaded", context=context, extra={
-                "frames_state": {
-                    "page_url": page.url,
-                    "frames": frame_locator_counts(page, SELECTOR_MAP),
-                }
-            })
+def detect_month_key_from_rows(rows: List[List[Any]]) -> str:
+    for r in rows:
+        if not r or len(r) < 1:
+            continue
+        a = str(r[0]).strip()
+        m = re.search(r"(\d{4})[/-](\d{2})[/-](\d{2})", a)
+        if m:
+            return f"{m.group(1)}/{m.group(2)}"
+    now = datetime.datetime.now()
+    return f"{now.year:04d}/{now.month:02d}"
 
-            # 2) 로그인 입력
-            # (회사코드/아이디/비번 셀렉터는 계정/국가에 따라 다를 수 있어 fallback 처리)
-            def fill_first(selector, value):
-                loc = page.locator(selector)
+def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
+    if not PLAYWRIGHT_IMPORT_OK:
+        return False, {"error": "Playwright import failed"}
+
+    com_code = get_env("COM_CODE").strip()
+    user_id = get_env("USER_ID").strip()
+    user_pw = get_env("USER_PW").strip()
+    login_url = get_env("ECOUNT_LOGIN_URL", "https://login.ecount.com/Login/").strip()
+    dl_dir = get_env("DOWNLOAD_DIR", "/tmp").strip() or "/tmp"
+
+    result: Dict[str, Any] = {
+        "login_url": login_url,
+        "download_dir": dl_dir,
+    }
+
+    try:
+        from openpyxl import load_workbook
+    except Exception as e:
+        return False, {"error": f"openpyxl import failed: {repr(e)}"}
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"]
+            )
+            context = browser.new_context(accept_downloads=True)
+            page = context.new_page()
+            page.set_default_timeout(120000)
+            page.set_default_navigation_timeout(120000)
+
+            # 1) 로그인
+            page.goto(login_url, wait_until="commit", timeout=30000)
+            page.wait_for_timeout(3000)
+
+            try:
+                page.locator("#com_code").fill(com_code)
+                page.locator("#id").fill(user_id)
+                page.locator("#passwd").fill(user_pw)
+            except Exception as e:
+                result["fill_error"] = repr(e)
+
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(5000)
+            result["step_login"] = "done"
+            result["url_after_login"] = page.url
+
+            # 2) iframe 포함 메뉴 클릭
+            def click_text(txt: str) -> bool:
+                loc = page.locator(f"text={txt}")
                 if loc.count() > 0:
-                    loc.first.fill(value)
+                    loc.first.click()
                     return True
+                for frame in page.frames:
+                    try:
+                        loc = frame.locator(f"text={txt}")
+                        if loc.count() > 0:
+                            loc.first.click()
+                            return True
+                    except Exception:
+                        continue
                 return False
 
-            # 회사코드
-            ok_com = fill_first(SELECTOR_MAP["login_com"], com_code)
-            ok_id = fill_first(SELECTOR_MAP["login_id"], user_id)
-            ok_pw = fill_first(SELECTOR_MAP["login_pw"], user_pw)
+            def click_menu(link_id: str, txt: str) -> bool:
+                loc = page.locator(f"#{link_id}")
+                if loc.count() > 0:
+                    loc.first.click()
+                    return True
+                for frame in page.frames:
+                    try:
+                        loc = frame.locator(f"#{link_id}")
+                        if loc.count() > 0:
+                            loc.first.click()
+                            return True
+                    except Exception:
+                        continue
+                return click_text(txt)
 
-            if not (ok_com and ok_id and ok_pw):
-                attach_debug(result, page, "login_fields_not_found", context=context, extra={
-                    "ok_com": ok_com, "ok_id": ok_id, "ok_pw": ok_pw,
-                    "frames_state": {
-                        "page_url": page.url,
-                        "frames": frame_locator_counts(page, SELECTOR_MAP),
-                    }
-                })
-                browser.close()
-                return False, {"error": "Login fields not found", "partial": result}
+            ok_steps = {}
+            result["frame_count"] = len(page.frames)
+            ok_steps["판매현황"] = click_menu("link_depth4_MENUTREE_000494", "판매현황")
+            result["steps"] = ok_steps
+            page.wait_for_timeout(2000)
+            ok_steps["SAT"] = click_text("SAT")
+            page.wait_for_timeout(1500)
+            ok_steps["금월(~오늘)"] = click_text("금월(~오늘)")
+            page.wait_for_timeout(1500)
 
-            # 3) 로그인 버튼 클릭
-            # 에카운트 로그인 버튼은 여러 형태가 있으므로 넓게 잡음
-            login_btn = page.locator(
-                'button:has-text("로그인"), input[type="submit"], button[type="submit"], a:has-text("로그인")'
-            )
-            if login_btn.count() == 0:
-                attach_debug(result, page, "login_button_not_found", context=context)
-                browser.close()
-                return False, {"error": "Login button not found", "partial": result}
+            # 3) 다운로드
+            excel_clicked = False
+            for label in ["Excel(화면)", "엑셀(화면)", "Excel"]:
+                if click_text(label):
+                    excel_clicked = True
+                    break
 
-            # 클릭 후 로딩 대기 (네비게이션 이벤트에 의존하지 않음)
-            login_btn.first.click()
-            page.wait_for_timeout(1200)
+            ok_steps["ExcelClick"] = excel_clicked
+            if not excel_clicked:
+                raise RuntimeError("Excel download button not found")
 
-            # 4) ✅ 핵심: ERP 준비 완료 판정 (URL + ERP 메뉴 등장)
-            ok, info = wait_until_erp_ready(page, timeout_ms=60000, selector_map=SELECTOR_MAP)
-            result["steps"]["login_check"] = info
+            with page.expect_download(timeout=120000) as dlinfo:
+                pass
+            download = dlinfo.value
+            save_path = os.path.join(dl_dir, download.suggested_filename)
+            download.save_as(save_path)
+            result["downloaded_file"] = save_path
 
-            if not ok:
-                err_txt = collect_login_error_text(page)
-                attach_debug(result, page, "login_not_redirected", context=context, extra={
-                    "error_text": err_txt,
-                    "frames_state": {
-                        "page_url": page.url,
-                        "frames": frame_locator_counts(page, SELECTOR_MAP),
-                    },
-                })
-                browser.close()
-                return False, {
-                    "error": "ERP not ready after login (menu not found)",
-                    "partial": result
-                }
+            # 4) 엑셀 검증
+            wb = load_workbook(save_path, data_only=False, read_only=True)
+            if "판매현황" not in wb.sheetnames:
+                raise RuntimeError(f"sheet '판매현황' not found: {wb.sheetnames}")
 
-            # 5) ERP 도착 디버그
-            attach_debug(result, page, "erp_loaded", context=context, extra={
-                "frames_state": {
-                    "page_url": page.url,
-                    "frames": frame_locator_counts(page, SELECTOR_MAP),
-                }
-            })
-            result["steps"]["login"] = "done"
-            result["erp"] = {"url": page.url}
+            ws = wb["판매현황"]
+            a1 = ws["A1"].value
+            if not isinstance(a1, str) or "회사명" not in a1:
+                raise RuntimeError("A1 meta pattern not found")
 
+            headers = [ws.cell(row=2, column=c).value for c in range(1, 11)]
+            if headers != EXPECTED_HEADERS:
+                raise RuntimeError(f"header mismatch: {headers}")
+
+            last = ws.max_row
+            while last >= 3 and (ws.cell(row=last, column=1).value in (None, "")):
+                last -= 1
+            data_end = last - 3
+            if data_end < 3:
+                raise RuntimeError("no data rows after excluding last 3 rows")
+
+            rows = []
+            for r in range(3, data_end + 1):
+                rows.append([ws.cell(row=r, column=c).value for c in range(1, 11)])
+
+            result["row_count"] = len(rows)
+            result["month_key"] = detect_month_key_from_rows(rows)
             browser.close()
-            return True, result
 
-        except PWTimeoutError as e:
-            attach_debug(result, page, "timeout", context=context, extra={"err": str(e)})
-            browser.close()
-            return False, {"error": "timeout", "partial": result}
+        return True, result
 
-        except Exception as e:
-            attach_debug(result, page, "exception", context=context, extra={
-                "err": str(e),
-                "trace": traceback.format_exc()[:5000],
-            })
-            browser.close()
-            return False, {"error": "exception", "partial": result}
+    except PWTimeoutError as e:
+        return False, {"error": f"Playwright timeout: {repr(e)}", "partial": result}
+    except Exception as e:
+        return False, {"error": f"ERP stage failed: {repr(e)}", "partial": result}
 
-# =========================
-# Routes
-# =========================
+def stage_erp() -> Dict[str, Any]:
+    ok, payload = ecount_download_and_validate()
+    return {
+        "stage": "erp",
+        "ok": ok,
+        "payload": payload,
+        "timestamp": now_kst_str(),
+    }
+
+def ym_key_from_a(a_val: Any) -> str:
+    if a_val is None:
+        return ""
+    s = str(a_val).strip()
+    m = re.search(r"(\d{4})[/-](\d{2})[/-](\d{2})", s)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+    m = re.search(r"(\d{4})(\d{2})(\d{2})", s)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+    return ""
+
+def stage_all() -> Dict[str, Any]:
+    env_res = stage_env()
+    if not env_res["ok"]:
+        return {"stage": "all", "ok": False, "failed_at": "env", "env": env_res, "timestamp": now_kst_str()}
+
+    gc = gspread_client()
+    sh, ws = open_target_worksheet(gc)
+    log_ws = ensure_log_worksheet(sh)
+
+    ok, erp_payload = ecount_download_and_validate()
+    if not ok:
+        append_log_row(log_ws, "all", "FAIL", f"erp_failed: {erp_payload.get('error','')}")
+        return {
+            "stage": "all",
+            "ok": False,
+            "failed_at": "erp",
+            "erp": erp_payload,
+            "timestamp": now_kst_str(),
+        }
+
+    month_key = erp_payload.get("month_key", "")
+    downloaded_file = erp_payload.get("downloaded_file", "")
+
+    from openpyxl import load_workbook
+    wb = load_workbook(downloaded_file, data_only=False, read_only=True)
+    src = wb["판매현황"]
+    last = src.max_row
+    while last >= 3 and (src.cell(row=last, column=1).value in (None, "")):
+        last -= 1
+    data_end = last - 3
+    rows = []
+    for r in range(3, data_end + 1):
+        rows.append([src.cell(row=r, column=c).value for c in range(1, 11)])
+    inserted = len(rows)
+
+    values = ws.get_all_values()
+    if not values:
+        values = []
+    header = values[0] if values else []
+    body = values[1:] if len(values) >= 2 else []
+
+    kept = []
+    deleted = 0
+    for r in body:
+        a = r[0] if len(r) > 0 else ""
+        if ym_key_from_a(a) == month_key:
+            deleted += 1
+        else:
+            kept.append(r)
+
+    new_body = kept + rows
+    ws.clear()
+
+    out = []
+    if header:
+        out.append(header)
+    out.extend(new_body)
+    ws.update("A1", out, value_input_option="USER_ENTERED")
+
+    append_log_row(log_ws, "all", "OK", f"month={month_key}, deleted={deleted}, inserted={inserted}")
+
+    return {
+        "stage": "all",
+        "ok": True,
+        "month_key": month_key,
+        "deleted_rows_in_month": deleted,
+        "inserted_rows": inserted,
+        "target_sheet": ws.title,
+        "log_sheet": log_ws.title,
+        "timestamp": now_kst_str(),
+    }
+
 @app.route("/", methods=["GET"])
-def root():
-    return "OK", 200
+def health():
+    return f"OK | {APP_REV}", 200
 
-@app.route("/run", methods=["GET", "POST"])
+@app.route("/run", methods=["POST", "GET"])
 def run_job():
     stage = (request.args.get("stage") or "").strip().lower()
+
     if stage in ("", "help"):
         return jsonify({
             "ok": True,
             "app_rev": APP_REV,
-            "stages": ["env", "erp", "all"],
-            "examples": [
-                "/run?stage=env",
-                "/run?stage=erp",
-                "/run?stage=all",
-            ],
+            "stages": ["env", "gsheet", "erp", "all"],
+            "examples": ["/run?stage=env", "/run?stage=gsheet", "/run?stage=erp", "/run?stage=all"],
             "timestamp": now_kst_str(),
         }), 200
 
     if stage == "env":
-        return jsonify({
-            "ok": True,
-            "app_rev": APP_REV,
-            "timestamp": now_kst_str(),
-            "env": {
-                "ECOUNT_COM_CODE": "✅" if os.environ.get("ECOUNT_COM_CODE") else "❌",
-                "ECOUNT_USER_ID": "✅" if os.environ.get("ECOUNT_USER_ID") else "❌",
-                "ECOUNT_USER_PW": "✅" if os.environ.get("ECOUNT_USER_PW") else "❌",
-            }
-        }), 200
+        res = stage_env()
+        return jsonify(res), (200 if res["ok"] else 400)
+
+    if stage == "gsheet":
+        try:
+            res = stage_gsheet()
+            return jsonify(res), 200
+        except Exception as e:
+            return jsonify({"stage": "gsheet", "ok": False, "error": repr(e), "timestamp": now_kst_str()}), 500
 
     if stage == "erp":
-        ok, payload = run_stage_erp()
-        return jsonify({"ok": ok, **payload}), (200 if ok else 500)
+        res = stage_erp()
+        return jsonify(res), (200 if res["ok"] else 500)
 
     if stage == "all":
-        ok_erp, erp_payload = run_stage_erp()
-        ok = ok_erp
-        return jsonify({
-            "ok": ok,
-            "app_rev": APP_REV,
-            "timestamp": now_kst_str(),
-            "erp": erp_payload.get("erp"),
-            "error": erp_payload.get("error"),
-            "partial": erp_payload.get("partial"),
-        }), (200 if ok else 500)
+        res = stage_all()
+        return jsonify(res), (200 if res["ok"] else 500)
 
-    return jsonify({"ok": False, "error": f"Unknown stage: {stage}", "timestamp": now_kst_str()}), 400
+    return jsonify({"ok": False, "error": f"unknown stage: {stage}"}), 400
 
-
-# local run: python app.py
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8080"))
+    port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
