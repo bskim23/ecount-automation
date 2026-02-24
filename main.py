@@ -186,22 +186,43 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
             result["step_login"] = "done"
             result["url_after_login"] = page.url
 
-            # 2) 메뉴 클릭
+            # 2) iframe 대기 후 메뉴 클릭
             def click_text(txt: str) -> bool:
+                # 메인 페이지 시도
                 loc = page.locator(f"text={txt}")
                 if loc.count() > 0:
                     loc.first.click()
                     return True
+                # iframe 안에서 시도
+                for frame in page.frames:
+                    try:
+                        loc = frame.locator(f"text={txt}")
+                        if loc.count() > 0:
+                            loc.first.click()
+                            return True
+                    except Exception:
+                        continue
                 return False
 
             def click_menu(link_id: str, txt: str) -> bool:
+                # 메인 페이지 시도
                 loc = page.locator(f"#{link_id}")
                 if loc.count() > 0:
                     loc.first.click()
                     return True
+                # iframe 안에서 시도
+                for frame in page.frames:
+                    try:
+                        loc = frame.locator(f"#{link_id}")
+                        if loc.count() > 0:
+                            loc.first.click()
+                            return True
+                    except Exception:
+                        continue
                 return click_text(txt)
 
             ok_steps = {}
+            result["frame_count"] = len(page.frames)
             ok_steps["판매현황"] = click_menu("link_depth4_MENUTREE_000494", "판매현황")
             result["steps"] = ok_steps
             page.wait_for_timeout(2000)
