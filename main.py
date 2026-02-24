@@ -547,7 +547,7 @@ def stage_all() -> Dict[str, Any]:
 # -----------------------------
 @app.route("/", methods=["GET"])
 def health():
-    return "OK", {APP_REV}", 200
+    return f"OK | {APP_REV}", 200
 
 
 @app.route("/run", methods=["POST", "GET"])
