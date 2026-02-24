@@ -180,7 +180,6 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
                 page.locator("#passwd").fill(user_pw)
             except Exception as e:
                 result["fill_error"] = repr(e)
-
             page.keyboard.press("Enter")
             page.wait_for_timeout(3000)
             result["step_login"] = "done"
