@@ -1,4 +1,4 @@
-APP_REV = "2026-02-24_19"
+APP_REV = "2026-02-24_22"
 
 from flask import Flask, request, jsonify
 import os, json, base64, re, datetime
@@ -175,17 +175,21 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
         return False, {"error": f"openpyxl import failed: {repr(e)}"}
 
     try:
+        print("[ERP] launching playwright...", flush=True)
         with sync_playwright() as p:
+            print("[ERP] playwright started, launching chromium...", flush=True)
             browser = p.chromium.launch(
                 headless=True,
                 args=["--no-sandbox", "--disable-dev-shm-usage"]
             )
+            print("[ERP] chromium launched", flush=True)
             context = browser.new_context(accept_downloads=True)
             page = context.new_page()
-            page.set_default_timeout(120000)
-            page.set_default_navigation_timeout(120000)
+            page.set_default_timeout(30000)
+            page.set_default_navigation_timeout(30000)
 
             # 1) 로그인 ── _12 그대로
+            print(f"[ERP] goto {login_url}", flush=True)
             page.goto(login_url, wait_until="commit", timeout=30000)
             page.wait_for_timeout(3000)
 
@@ -197,9 +201,11 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
                 result["fill_error"] = repr(e)
 
             page.keyboard.press("Enter")
+            print("[ERP] login Enter, waiting 5s...", flush=True)
             page.wait_for_timeout(5000)
             result["step_login"] = "done"
             result["url_after_login"] = page.url
+            print(f"[ERP] login done url={page.url}", flush=True)
 
             # 2) 메뉴 클릭 ── _12 그대로
             def click_text(txt: str) -> bool:
@@ -230,16 +236,21 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
 
             ok_steps = {}
             result["frame_count"] = len(page.frames)
+            print("[ERP] clicking 재고I...", flush=True)
             ok_steps["재고I"] = click_menu("link_depth1_MENUTREE_000004", "재고 I")
             result["steps"] = ok_steps
             page.wait_for_timeout(2000)
+            print("[ERP] clicking 판매현황...", flush=True)
             ok_steps["판매현황"] = click_menu("link_depth4_MENUTREE_000494", "판매현황")
             page.wait_for_timeout(2000)
+            print("[ERP] clicking SAT...", flush=True)
             ok_steps["SAT"] = click_text("SAT")
             page.wait_for_timeout(1500)
+            print("[ERP] clicking 금월(~오늘)...", flush=True)
             ok_steps["금월(~오늘)"] = click_text("금월(~오늘)")
 
             # ★ JS 렌더링 완료 대기: 버튼이 DOM에 나타날 때까지 최대 15초 폴링
+            print("[ERP] polling for Excel button (max 15s)...", flush=True)
             EXCEL_SEL = "[data-item-key='excel_view_footer_toolbar']"
             excel_ctx = None
             for i in range(30):  # 0.5s × 30 = 15s
@@ -256,6 +267,7 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
                     break
 
             result["excel_wait_found"] = excel_ctx is not None
+            print(f"[ERP] excel_wait_found={excel_ctx is not None}", flush=True)
             result["debug_frame_urls"] = [f.url for f in page.frames]
 
             # 3) Excel(화면) 클릭 + 다운로드
