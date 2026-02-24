@@ -1,4 +1,4 @@
-APP_REV = "2026-02-24_18"
+APP_REV = "2026-02-24_19"
 
 from flask import Flask, request, jsonify
 import os, json, base64, re, datetime
@@ -239,10 +239,10 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
             page.wait_for_timeout(1500)
             ok_steps["금월(~오늘)"] = click_text("금월(~오늘)")
 
-            # ★ 버튼이 나타날 때까지 최대 10초 폴링
+            # ★ JS 렌더링 완료 대기: 버튼이 DOM에 나타날 때까지 최대 15초 폴링
             EXCEL_SEL = "[data-item-key='excel_view_footer_toolbar']"
             excel_ctx = None
-            for _ in range(20):  # 0.5s × 20 = 10s
+            for i in range(30):  # 0.5s × 30 = 15s
                 page.wait_for_timeout(500)
                 for ctx in [page] + page.frames:
                     try:
@@ -252,61 +252,32 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
                     except Exception:
                         continue
                 if excel_ctx is not None:
+                    result["excel_found_after_ms"] = (i + 1) * 500
                     break
-            result["excel_wait_found"] = excel_ctx is not None
 
-            # ★ 항상 frame 목록 기록 (디버그)
+            result["excel_wait_found"] = excel_ctx is not None
             result["debug_frame_urls"] = [f.url for f in page.frames]
-            result["debug_frame_count"] = len(page.frames)
 
             # 3) Excel(화면) 클릭 + 다운로드
-            excel_clicked       = False
-            excel_selector_used = None
-            download            = None
+            excel_clicked = False
+            download = None
 
-            # 폴링으로 찾은 ctx 먼저 시도, 그 다음 전체 순회
-            ctx_list = ([excel_ctx] if excel_ctx else []) + [page] + page.frames
-            for ctx in ctx_list:
-                if excel_clicked:
-                    break
-                for sel in EXCEL_SELECTORS:
-                    try:
-                        loc = ctx.locator(sel)
-                        if loc.count() == 0:
-                            continue
-                        with page.expect_download(timeout=120000) as dlinfo:
-                            loc.first.click(timeout=5000, force=True)
-                        download            = dlinfo.value
-                        excel_clicked       = True
-                        excel_selector_used = sel
-                        break
-                    except Exception:
-                        continue
+            if excel_ctx is not None:
+                try:
+                    with page.expect_download(timeout=30000) as dlinfo:  # ★ 30초로 축소
+                        excel_ctx.locator(EXCEL_SEL).first.click(timeout=5000, force=True)
+                    download = dlinfo.value
+                    excel_clicked = True
+                except Exception as e:
+                    result["excel_click_error"] = repr(e)
 
-            ok_steps["ExcelClick"]      = excel_clicked
-            result["excel_selector_used"] = excel_selector_used  # 어떤 셀렉터가 성공했는지
+            ok_steps["ExcelClick"] = excel_clicked
 
             if not excel_clicked:
-                # ★ 실패 시에만 디버그 덤프
-                debug = []
-                for i, ctx in enumerate([page] + page.frames):
-                    try:
-                        texts = ctx.eval_on_selector_all(
-                            "button, a, span, li, td, input[type=button], input[type=submit]",
-                            "els => els.map(e => (e.innerText || e.value || '').trim())"
-                            "       .filter(t => t && t.length > 0 && t.length < 60)"
-                        )
-                        debug.append({
-                            "frame_index": i,
-                            "frame_url": ctx.url,
-                            "texts": list(dict.fromkeys(texts))[:100],
-                        })
-                    except Exception as e:
-                        debug.append({"frame_index": i, "error": repr(e)})
-                result["debug_frame_texts"] = debug
-                result["debug_frame_urls"]  = [f.url for f in page.frames]
                 browser.close()
-                raise RuntimeError("Excel(화면) button not found")
+                raise RuntimeError(
+                    f"Excel button {'found but click/download failed' if excel_ctx else 'not found in DOM (JS not rendered?)'}"
+                )
 
             save_path = os.path.join(dl_dir, download.suggested_filename)
             download.save_as(save_path)
