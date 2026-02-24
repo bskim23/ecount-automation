@@ -1,4 +1,4 @@
-APP_REV = "2026-02-24_14"
+APP_REV = "2026-02-24_17"
 
 from flask import Flask, request, jsonify
 import os, json, base64, re, datetime
@@ -128,7 +128,7 @@ EXPECTED_HEADERS = [
     "부가세", "합계", "거래처명", "적요", "거래처계층그룹명",
 ]
 
-# ── Excel 버튼 셀렉터 후보 (iframe 내부 기준으로 정리) ──────────────────────
+# ★ Excel 버튼 셀렉터 후보 목록
 EXCEL_SELECTORS = [
     "[data-item-key='excel_view_footer_toolbar']",
     "[data-item-key='excel_view']",
@@ -141,11 +141,6 @@ EXCEL_SELECTORS = [
     "li:has-text('Excel(화면)')",
     "td:has-text('Excel(화면)')",
     "text=Excel(화면)",
-    "button:has-text('Excel')",
-    "a:has-text('Excel')",
-    "span:has-text('Excel')",
-    "td:has-text('Excel')",
-    "text=Excel",
 ]
 
 def detect_month_key_from_rows(rows: List[List[Any]]) -> str:
@@ -159,37 +154,13 @@ def detect_month_key_from_rows(rows: List[List[Any]]) -> str:
     now = datetime.datetime.now()
     return f"{now.year:04d}/{now.month:02d}"
 
-# ── 프레임 전수 텍스트 덤프 (디버그용) ───────────────────────────────────────
-def dump_frame_texts(page) -> List[Dict]:
-    """모든 프레임에서 버튼/링크/span/td 텍스트를 수집해 반환."""
-    result = []
-    all_contexts = list(page.frames) + [page]
-    for i, ctx in enumerate(all_contexts):
-        try:
-            frame_url = ctx.url
-            texts = ctx.eval_on_selector_all(
-                "button, a, span, li, td, input[type=button], input[type=submit]",
-                "els => els.map(e => (e.innerText || e.value || '').trim())"
-                "       .filter(t => t && t.length > 0 && t.length < 60)"
-            )
-            # 중복 제거 + 최대 100개
-            unique_texts = list(dict.fromkeys(texts))[:100]
-            result.append({
-                "frame_index": i,
-                "frame_url": frame_url,
-                "texts": unique_texts,
-            })
-        except Exception as e:
-            result.append({"frame_index": i, "error": repr(e)})
-    return result
-
 def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
     if not PLAYWRIGHT_IMPORT_OK:
         return False, {"error": "Playwright import failed"}
 
-    com_code  = get_env("COM_CODE").strip()
-    user_id   = get_env("USER_ID").strip()
-    user_pw   = get_env("USER_PW").strip()
+    com_code = get_env("COM_CODE").strip()
+    user_id  = get_env("USER_ID").strip()
+    user_pw  = get_env("USER_PW").strip()
     login_url = get_env("ECOUNT_LOGIN_URL", "https://login.ecount.com/Login/").strip()
     dl_dir    = get_env("DOWNLOAD_DIR", "/tmp").strip() or "/tmp"
 
@@ -214,7 +185,7 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
             page.set_default_timeout(120000)
             page.set_default_navigation_timeout(120000)
 
-            # ── 1) 로그인 ──────────────────────────────────────────────
+            # 1) 로그인 ── _12 그대로
             page.goto(login_url, wait_until="commit", timeout=30000)
             page.wait_for_timeout(3000)
 
@@ -226,38 +197,31 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
                 result["fill_error"] = repr(e)
 
             page.keyboard.press("Enter")
-            # 로그인 후 networkidle 대기 (최대 15초)
-            try:
-                page.wait_for_load_state("networkidle", timeout=15000)
-            except Exception:
-                page.wait_for_timeout(5000)
-
+            page.wait_for_timeout(5000)
             result["step_login"] = "done"
             result["url_after_login"] = page.url
 
-            # ── 2) 메뉴 클릭 헬퍼 ─────────────────────────────────────
+            # 2) 메뉴 클릭 ── _12 그대로
             def click_text(txt: str) -> bool:
-                # iframe 우선, 마지막에 page
-                all_ctxs = list(page.frames) + [page]
-                for ctx in all_ctxs:
+                for ctx in [page] + page.frames:
                     try:
-                        for sel in [f"text={txt}", f"span:has-text('{txt}')", f"a:has-text('{txt}')"]:
-                            loc = ctx.locator(sel)
-                            if loc.count() > 0:
-                                loc.first.scroll_into_view_if_needed()
-                                loc.first.click(timeout=5000, force=True)
-                                return True
+                        loc = ctx.locator(f"text={txt}")
+                        if loc.count() > 0:
+                            loc.first.click(timeout=5000, force=True)
+                            return True
+                        loc2 = ctx.locator(f"span:has-text('{txt}')")
+                        if loc2.count() > 0:
+                            loc2.first.click(timeout=5000, force=True)
+                            return True
                     except Exception:
                         continue
                 return False
 
             def click_menu(link_id: str, txt: str) -> bool:
-                all_ctxs = list(page.frames) + [page]
-                for ctx in all_ctxs:
+                for ctx in [page] + page.frames:
                     try:
                         loc = ctx.locator(f"#{link_id}")
                         if loc.count() > 0:
-                            loc.first.scroll_into_view_if_needed()
                             loc.first.click(timeout=5000, force=True)
                             return True
                     except Exception:
@@ -265,47 +229,40 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
                 return click_text(txt)
 
             ok_steps = {}
-            result["frame_count_after_login"] = len(page.frames)
-
+            result["frame_count"] = len(page.frames)
             ok_steps["재고I"] = click_menu("link_depth1_MENUTREE_000004", "재고 I")
-            try:
-                page.wait_for_load_state("networkidle", timeout=8000)
-            except Exception:
-                page.wait_for_timeout(2000)
-
-            ok_steps["판매현황"] = click_menu("link_depth4_MENUTREE_000494", "판매현황")
-            try:
-                page.wait_for_load_state("networkidle", timeout=10000)
-            except Exception:
-                page.wait_for_timeout(3000)
-
-            ok_steps["SAT"] = click_text("SAT")
-            try:
-                page.wait_for_load_state("networkidle", timeout=8000)
-            except Exception:
-                page.wait_for_timeout(2000)
-
-            ok_steps["금월(~오늘)"] = click_text("금월(~오늘)")
-            try:
-                page.wait_for_load_state("networkidle", timeout=8000)
-            except Exception:
-                page.wait_for_timeout(2000)
-
             result["steps"] = ok_steps
-            result["frame_count_before_excel"] = len(page.frames)
+            page.wait_for_timeout(2000)
+            ok_steps["판매현황"] = click_menu("link_depth4_MENUTREE_000494", "판매현황")
+            page.wait_for_timeout(2000)
+            ok_steps["SAT"] = click_text("SAT")
+            page.wait_for_timeout(1500)
+            ok_steps["금월(~오늘)"] = click_text("금월(~오늘)")
 
-            # ── 3) 디버그: Excel 클릭 전 전체 텍스트 덤프 ────────────
-            result["debug_frame_texts_before_excel"] = dump_frame_texts(page)
+            # ★ 고정 대기 대신: 버튼이 실제로 나타날 때까지 최대 30초 폴링
+            EXCEL_SEL = "[data-item-key='excel_view_footer_toolbar']"
+            excel_ctx = None
+            for _ in range(60):  # 0.5s × 60 = 30s
+                page.wait_for_timeout(500)
+                for ctx in [page] + page.frames:
+                    try:
+                        if ctx.locator(EXCEL_SEL).count() > 0:
+                            excel_ctx = ctx
+                            break
+                    except Exception:
+                        continue
+                if excel_ctx is not None:
+                    break
+            result["excel_wait_found"] = excel_ctx is not None
 
-            # ── 4) Excel(화면) 버튼 클릭 + 다운로드 ──────────────────
-            excel_clicked = False
+            # 3) Excel(화면) 클릭 + 다운로드
+            excel_clicked       = False
             excel_selector_used = None
-            download = None
+            download            = None
 
-            # iframe 우선으로 순서 변경
-            all_search_ctxs = list(page.frames) + [page]
-
-            for ctx in all_search_ctxs:
+            # 폴링으로 찾은 ctx 먼저 시도, 그 다음 전체 순회
+            ctx_list = ([excel_ctx] if excel_ctx else []) + [page] + page.frames
+            for ctx in ctx_list:
                 if excel_clicked:
                     break
                 for sel in EXCEL_SELECTORS:
@@ -313,42 +270,51 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
                         loc = ctx.locator(sel)
                         if loc.count() == 0:
                             continue
-                        loc.first.scroll_into_view_if_needed()
                         with page.expect_download(timeout=120000) as dlinfo:
                             loc.first.click(timeout=5000, force=True)
-                        download = dlinfo.value
-                        excel_clicked = True
+                        download            = dlinfo.value
+                        excel_clicked       = True
                         excel_selector_used = sel
                         break
                     except Exception:
                         continue
 
-            ok_steps["ExcelClick"] = excel_clicked
-            result["excel_selector_used"] = excel_selector_used
+            ok_steps["ExcelClick"]      = excel_clicked
+            result["excel_selector_used"] = excel_selector_used  # 어떤 셀렉터가 성공했는지
 
             if not excel_clicked:
-                try:
-                    result["debug_frame_urls"] = [f.url for f in page.frames]
-                    result["debug_page_html_snippet"] = page.content()[:8000]
-                except Exception:
-                    pass
+                # ★ 실패 시에만 디버그 덤프
+                debug = []
+                for i, ctx in enumerate([page] + page.frames):
+                    try:
+                        texts = ctx.eval_on_selector_all(
+                            "button, a, span, li, td, input[type=button], input[type=submit]",
+                            "els => els.map(e => (e.innerText || e.value || '').trim())"
+                            "       .filter(t => t && t.length > 0 && t.length < 60)"
+                        )
+                        debug.append({
+                            "frame_index": i,
+                            "frame_url": ctx.url,
+                            "texts": list(dict.fromkeys(texts))[:100],
+                        })
+                    except Exception as e:
+                        debug.append({"frame_index": i, "error": repr(e)})
+                result["debug_frame_texts"] = debug
+                result["debug_frame_urls"]  = [f.url for f in page.frames]
                 browser.close()
-                raise RuntimeError(
-                    "Excel(화면) 버튼을 찾지 못했습니다. "
-                    "debug_frame_texts_before_excel 항목을 확인하세요."
-                )
+                raise RuntimeError("Excel(화면) button not found")
 
             save_path = os.path.join(dl_dir, download.suggested_filename)
             download.save_as(save_path)
             result["downloaded_file"] = save_path
 
-            # ── 5) 엑셀 검증 ──────────────────────────────────────────
-            wb  = load_workbook(save_path, data_only=False, read_only=True)
+            # 4) 엑셀 검증 ── _12 그대로
+            wb = load_workbook(save_path, data_only=False, read_only=True)
             if "판매현황" not in wb.sheetnames:
                 raise RuntimeError(f"sheet '판매현황' not found: {wb.sheetnames}")
 
-            ws  = wb["판매현황"]
-            a1  = ws["A1"].value
+            ws = wb["판매현황"]
+            a1 = ws["A1"].value
             if not isinstance(a1, str) or "회사명" not in a1:
                 raise RuntimeError("A1 meta pattern not found")
 
@@ -378,7 +344,6 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
     except Exception as e:
         return False, {"error": f"ERP stage failed: {repr(e)}", "partial": result}
 
-
 def stage_erp() -> Dict[str, Any]:
     ok, payload = ecount_download_and_validate()
     return {
@@ -403,10 +368,7 @@ def ym_key_from_a(a_val: Any) -> str:
 def stage_all() -> Dict[str, Any]:
     env_res = stage_env()
     if not env_res["ok"]:
-        return {
-            "stage": "all", "ok": False, "failed_at": "env",
-            "env": env_res, "timestamp": now_kst_str()
-        }
+        return {"stage": "all", "ok": False, "failed_at": "env", "env": env_res, "timestamp": now_kst_str()}
 
     gc = gspread_client()
     sh, ws = open_target_worksheet(gc)
@@ -427,7 +389,7 @@ def stage_all() -> Dict[str, Any]:
     downloaded_file = erp_payload.get("downloaded_file", "")
 
     from openpyxl import load_workbook
-    wb  = load_workbook(downloaded_file, data_only=False, read_only=True)
+    wb = load_workbook(downloaded_file, data_only=False, read_only=True)
     src = wb["판매현황"]
     last = src.max_row
     while last >= 3 and (src.cell(row=last, column=1).value in (None, "")):
@@ -462,8 +424,7 @@ def stage_all() -> Dict[str, Any]:
     out.extend(new_body)
     ws.update("A1", out, value_input_option="USER_ENTERED")
 
-    append_log_row(log_ws, "all", "OK",
-                   f"month={month_key}, deleted={deleted}, inserted={inserted}")
+    append_log_row(log_ws, "all", "OK", f"month={month_key}, deleted={deleted}, inserted={inserted}")
 
     return {
         "stage": "all",
@@ -475,8 +436,6 @@ def stage_all() -> Dict[str, Any]:
         "log_sheet": log_ws.title,
         "timestamp": now_kst_str(),
     }
-
-# ── Flask 라우팅 ───────────────────────────────────────────────────────────────
 
 @app.route("/", methods=["GET"])
 def health():
@@ -491,12 +450,7 @@ def run_job():
             "ok": True,
             "app_rev": APP_REV,
             "stages": ["env", "gsheet", "erp", "all"],
-            "examples": [
-                "/run?stage=env",
-                "/run?stage=gsheet",
-                "/run?stage=erp",
-                "/run?stage=all",
-            ],
+            "examples": ["/run?stage=env", "/run?stage=gsheet", "/run?stage=erp", "/run?stage=all"],
             "timestamp": now_kst_str(),
         }), 200
 
@@ -509,10 +463,7 @@ def run_job():
             res = stage_gsheet()
             return jsonify(res), 200
         except Exception as e:
-            return jsonify({
-                "stage": "gsheet", "ok": False,
-                "error": repr(e), "timestamp": now_kst_str()
-            }), 500
+            return jsonify({"stage": "gsheet", "ok": False, "error": repr(e), "timestamp": now_kst_str()}), 500
 
     if stage == "erp":
         res = stage_erp()
