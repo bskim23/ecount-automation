@@ -1,14 +1,33 @@
-from flask import Flask, jsonify, request
-import os, re, time, datetime, json
-from typing import List, Any, Optional, Tuple
-
-from playwright.sync_api import sync_playwright
-from openpyxl import load_workbook
-
-import gspread
-from google.oauth2.service_account import Credentials
+from flask import Flask, jsonify
+import os
 
 app = Flask(__name__)
+
+@app.route("/", methods=["GET"])
+def health():
+    return "OK", 200
+
+@app.route("/run", methods=["GET"])
+def run_job():
+    keys = [
+        "GOOGLE_SHEET_ID",
+        "SHEET_NAME",
+        "GOOGLE_SERVICE_ACCOUNT_JSON",
+        "COM_CODE",
+        "USER_ID",
+        "USER_PW",
+        "ENV",
+    ]
+    present = {k: bool(os.environ.get(k)) for k in keys}
+    # 민감정보는 값 자체를 절대 출력하지 않고 존재 여부만 체크
+    return jsonify({
+        "status": "env_check",
+        "present": present
+    }), 200
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
 
 # -------------------------
 # 0) Health
