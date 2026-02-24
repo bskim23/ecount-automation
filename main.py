@@ -1,4 +1,4 @@
-APP_REV = "2026-02-24_17"
+APP_REV = "2026-02-24_18"
 
 from flask import Flask, request, jsonify
 import os, json, base64, re, datetime
@@ -239,10 +239,10 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
             page.wait_for_timeout(1500)
             ok_steps["금월(~오늘)"] = click_text("금월(~오늘)")
 
-            # ★ 고정 대기 대신: 버튼이 실제로 나타날 때까지 최대 30초 폴링
+            # ★ 버튼이 나타날 때까지 최대 10초 폴링
             EXCEL_SEL = "[data-item-key='excel_view_footer_toolbar']"
             excel_ctx = None
-            for _ in range(60):  # 0.5s × 60 = 30s
+            for _ in range(20):  # 0.5s × 20 = 10s
                 page.wait_for_timeout(500)
                 for ctx in [page] + page.frames:
                     try:
@@ -254,6 +254,10 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
                 if excel_ctx is not None:
                     break
             result["excel_wait_found"] = excel_ctx is not None
+
+            # ★ 항상 frame 목록 기록 (디버그)
+            result["debug_frame_urls"] = [f.url for f in page.frames]
+            result["debug_frame_count"] = len(page.frames)
 
             # 3) Excel(화면) 클릭 + 다운로드
             excel_clicked       = False
