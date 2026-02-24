@@ -305,26 +305,16 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
 
             # password는 type=password를 우선
             try:
-                # 회사코드 / 아이디
-                fill_best(["com", "company", "회사", "코드", "code"], com_code)
-                fill_best(["id", "user", "login", "아이디"], user_id)
-
-                pw = page.locator("input[type='password']").first
-                pw.click()
-                pw.fill(user_pw)
+                page.locator("#com_code").fill(com_code)
+                page.locator("#id").fill(user_id)
+                page.locator("#passwd").fill(user_pw)
             except Exception as e:
                 result["fill_error"] = repr(e)
-                # 다음을 위해 화면 상태를 유지한 채 진행 시도
                 pass
 
             # 로그인 버튼
             # '로그인' 텍스트 기반
-            btn = page.get_by_role("button", name=re.compile(r"(로그인|login)", re.IGNORECASE))
-            if btn.count() > 0:
-                btn.first.click()
-            else:
-                # submit fallback
-                page.keyboard.press("Enter")
+           page.keyboard.press("Enter")
 
             # 3) 메뉴 이동 (판매현황 → SAT → 금월(~오늘) → Excel(화면))
             # 로딩 대기
