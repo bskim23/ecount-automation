@@ -549,22 +549,14 @@ def stage_all() -> Dict[str, Any]:
 def health():
     return f"OK | {APP_REV}", 200
 
-
 @app.route("/run", methods=["POST", "GET"])
 def run_job():
-    # stage는 query 우선, 없으면 body(json)의 stage
     stage = (request.args.get("stage") or "").strip().lower()
-    if not stage:
-        try:
-            body = request.get_json(silent=True) or {}
-            stage = str(body.get("stage", "")).strip().lower()
-        except Exception:
-            stage = ""
 
     if stage in ("", "help"):
         return jsonify({
             "ok": True,
-            "message": "stage required",
+            "app_rev": APP_REV,
             "stages": ["env", "gsheet", "erp", "all"],
             "examples": [
                 "/run?stage=env",
@@ -594,12 +586,7 @@ def run_job():
         res = stage_all()
         return jsonify(res), (200 if res["ok"] else 500)
 
-    return jsonify({
-        "ok": False,
-        "error": f"unknown stage: {stage}",
-        "allowed": ["env", "gsheet", "erp", "all"],
-        "timestamp": now_kst_str(),
-    }), 400
+    return jsonify({"ok": False, "error": f"unknown stage: {stage}"}), 400
 
 
 if __name__ == "__main__":
