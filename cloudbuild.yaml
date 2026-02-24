@@ -12,3 +12,4 @@ steps:
       - '--image=gcr.io/$PROJECT_ID/ecount-automation'
       - '--region=asia-northeast3'
       - '--platform=managed'
+      
