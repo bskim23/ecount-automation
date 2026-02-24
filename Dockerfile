@@ -26,4 +26,4 @@ RUN python -m playwright install chromium
 COPY . .
 
 EXPOSE 8080
-CMD ["gunicorn", "-b", ":8080", "main:app", "--workers", "1", "--threads", "8", "--timeout", "300"]
+CMD ["gunicorn", "-b", ":8080", "app:app", "--workers", "1", "--threads", "8", "--timeout", "300"]
