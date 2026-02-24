@@ -1,4 +1,4 @@
-APP_REV = "2026-02-24_08"
+APP_REV = "2026-02-24_09"
 
 from flask import Flask, request, jsonify
 import os, json, base64, re, datetime
@@ -186,32 +186,24 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
             result["step_login"] = "done"
             result["url_after_login"] = page.url
 
-            # 2) iframe 포함 메뉴 클릭
+            # 2) 메뉴 클릭
             def click_text(txt: str) -> bool:
-                loc = page.locator(f"text={txt}")
-                if loc.count() > 0:
-                    loc.first.click()
-                    return True
-                for frame in page.frames:
+                for ctx in [page] + page.frames:
                     try:
-                        loc = frame.locator(f"text={txt}")
+                        loc = ctx.locator(f"text={txt}")
                         if loc.count() > 0:
-                            loc.first.click()
+                            loc.first.click(timeout=5000, force=True)
                             return True
                     except Exception:
                         continue
                 return False
 
             def click_menu(link_id: str, txt: str) -> bool:
-                loc = page.locator(f"#{link_id}")
-                if loc.count() > 0:
-                    loc.first.click()
-                    return True
-                for frame in page.frames:
+                for ctx in [page] + page.frames:
                     try:
-                        loc = frame.locator(f"#{link_id}")
+                        loc = ctx.locator(f"#{link_id}")
                         if loc.count() > 0:
-                            loc.first.click()
+                            loc.first.click(timeout=5000, force=True)
                             return True
                     except Exception:
                         continue
@@ -219,24 +211,26 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
 
             ok_steps = {}
             result["frame_count"] = len(page.frames)
-            ok_steps["판매현황"] = click_menu("link_depth4_MENUTREE_000494", "판매현황")
+            ok_steps["재고I"] = click_menu("link_depth1_MENUTREE_000004", "재고 I")
             result["steps"] = ok_steps
+            page.wait_for_timeout(2000)
+            ok_steps["판매현황"] = click_menu("link_depth4_MENUTREE_000494", "판매현황")
             page.wait_for_timeout(2000)
             ok_steps["SAT"] = click_text("SAT")
             page.wait_for_timeout(1500)
             ok_steps["금월(~오늘)"] = click_text("금월(~오늘)")
             page.wait_for_timeout(1500)
 
-            # 3) 다운로드
+            # 3) Excel(화면) 클릭 후 다운로드
             excel_clicked = False
-            for label in ["Excel(화면)", "엑셀(화면)", "Excel"]:
+            for label in ["Excel(화면)", "엑셀(화면)"]:
                 if click_text(label):
                     excel_clicked = True
                     break
 
             ok_steps["ExcelClick"] = excel_clicked
             if not excel_clicked:
-                raise RuntimeError("Excel download button not found")
+                raise RuntimeError("Excel(화면) button not found")
 
             with page.expect_download(timeout=120000) as dlinfo:
                 pass
