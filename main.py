@@ -245,11 +245,12 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
             browser = p.chromium.launch(headless=headless)
             context = browser.new_context(accept_downloads=True)
             page = context.new_page()
-            page.set_default_timeout(timeout_ms)
-            page.set_default_navigation_timeout(nav_timeout_ms)
+            page.set_default_timeout(120000)
+            page.set_default_navigation_timeout(120000)
 
             # 1) 로그인 페이지
-            page.goto(login_url, wait_until="domcontentloaded")
+            page.goto(login_url, wait_until="commit", timeout=30000)
+            page.wait_for_timeout(3000)
 
             # 2) 입력 필드 탐색 (가급적 안전한 방식: name/id 기반 + fallback)
             # 회사코드
