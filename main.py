@@ -192,14 +192,21 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
                     return True
                 return False
 
+            def click_menu(link_id: str, txt: str) -> bool:
+                loc = page.locator(f"#{link_id}")
+                if loc.count() > 0:
+                    loc.first.click()
+                    return True
+                return click_text(txt)
+
             ok_steps = {}
-            ok_steps["판매현황"] = click_text("판매현황")
-            page.wait_for_timeout(1500)
+            ok_steps["판매현황"] = click_menu("link_depth4_MENUTREE_000494", "판매현황")
+            result["steps"] = ok_steps
+            page.wait_for_timeout(2000)
             ok_steps["SAT"] = click_text("SAT")
             page.wait_for_timeout(1500)
             ok_steps["금월(~오늘)"] = click_text("금월(~오늘)")
-            page.wait_for_timeout(1500)
-            result["steps"] = ok_steps
+            page.wait_for_timeout(1500)            
 
             # 3) 다운로드
             excel_clicked = False
