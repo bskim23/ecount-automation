@@ -1,4 +1,4 @@
-APP_REV = "2026-02-24_06"
+APP_REV = "2026-02-24_07"
 
 from flask import Flask, request, jsonify
 import os, json, base64, re, datetime
@@ -180,9 +180,11 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
                 page.locator("#passwd").fill(user_pw)
             except Exception as e:
                 result["fill_error"] = repr(e)
+
             page.keyboard.press("Enter")
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(5000)
             result["step_login"] = "done"
+            result["url_after_login"] = page.url
 
             # 2) 메뉴 클릭
             def click_text(txt: str) -> bool:
@@ -206,7 +208,7 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
             ok_steps["SAT"] = click_text("SAT")
             page.wait_for_timeout(1500)
             ok_steps["금월(~오늘)"] = click_text("금월(~오늘)")
-            page.wait_for_timeout(1500)            
+            page.wait_for_timeout(1500)
 
             # 3) 다운로드
             excel_clicked = False
