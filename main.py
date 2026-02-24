@@ -1,4 +1,4 @@
-APP_REV = "2026-02-24_23"
+APP_REV = "2026-02-24_24"
 
 from flask import Flask, request, jsonify
 import os, json, base64, re, datetime
@@ -299,11 +299,15 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
                 )
 
             save_path = os.path.join(dl_dir, download.suggested_filename)
+            print(f"[ERP] saving to {save_path}...", flush=True)
             download.save_as(save_path)
+            print("[ERP] save_as done", flush=True)
             result["downloaded_file"] = save_path
 
             # 4) 엑셀 검증 ── _12 그대로
+            print("[ERP] loading workbook...", flush=True)
             wb = load_workbook(save_path, data_only=False, read_only=True)
+            print(f"[ERP] workbook loaded, sheets={wb.sheetnames}", flush=True)
             if "판매현황" not in wb.sheetnames:
                 raise RuntimeError(f"sheet '판매현황' not found: {wb.sheetnames}")
 
