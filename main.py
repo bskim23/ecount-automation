@@ -1,4 +1,4 @@
-APP_REV = "2026-02-24_11"
+APP_REV = "2026-02-24_13"
 
 from flask import Flask, request, jsonify
 import os, json, base64, re, datetime
@@ -128,6 +128,24 @@ EXPECTED_HEADERS = [
     "부가세", "합계", "거래처명", "적요", "거래처계층그룹명",
 ]
 
+# Excel 버튼 셀렉터 후보 목록 (앞에서부터 순서대로 시도)
+EXCEL_SELECTORS = [
+    "[data-item-key='excel_view_footer_toolbar']",
+    "[data-item-key='excel_view']",
+    "[data-item-key*='excel']",
+    "button:has-text('Excel(화면)')",
+    "a:has-text('Excel(화면)')",
+    "span:has-text('Excel(화면)')",
+    "li:has-text('Excel(화면)')",
+    "[title='Excel(화면)']",
+    "[onclick*='excel']",
+    "text=Excel(화면)",
+    "button:has-text('Excel')",
+    "a:has-text('Excel')",
+    "span:has-text('Excel')",
+    "text=Excel",
+]
+
 def detect_month_key_from_rows(rows: List[List[Any]]) -> str:
     for r in rows:
         if not r or len(r) < 1:
@@ -144,10 +162,10 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
         return False, {"error": "Playwright import failed"}
 
     com_code = get_env("COM_CODE").strip()
-    user_id = get_env("USER_ID").strip()
-    user_pw = get_env("USER_PW").strip()
+    user_id  = get_env("USER_ID").strip()
+    user_pw  = get_env("USER_PW").strip()
     login_url = get_env("ECOUNT_LOGIN_URL", "https://login.ecount.com/Login/").strip()
-    dl_dir = get_env("DOWNLOAD_DIR", "/tmp").strip() or "/tmp"
+    dl_dir    = get_env("DOWNLOAD_DIR", "/tmp").strip() or "/tmp"
 
     result: Dict[str, Any] = {
         "login_url": login_url,
@@ -170,7 +188,7 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
             page.set_default_timeout(120000)
             page.set_default_navigation_timeout(120000)
 
-            # 1) 로그인
+            # ── 1) 로그인 ──────────────────────────────────────────────
             page.goto(login_url, wait_until="commit", timeout=30000)
             page.wait_for_timeout(3000)
 
@@ -186,7 +204,7 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
             result["step_login"] = "done"
             result["url_after_login"] = page.url
 
-            # 2) 메뉴 클릭
+            # ── 2) 메뉴 클릭 헬퍼 ─────────────────────────────────────
             def click_text(txt: str) -> bool:
                 for ctx in [page] + page.frames:
                     try:
@@ -215,45 +233,59 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
 
             ok_steps = {}
             result["frame_count"] = len(page.frames)
-            ok_steps["재고I"] = click_menu("link_depth1_MENUTREE_000004", "재고 I")
-            result["steps"] = ok_steps
+            ok_steps["재고I"]    = click_menu("link_depth1_MENUTREE_000004", "재고 I")
+            result["steps"]      = ok_steps
             page.wait_for_timeout(2000)
             ok_steps["판매현황"] = click_menu("link_depth4_MENUTREE_000494", "판매현황")
             page.wait_for_timeout(2000)
-            ok_steps["SAT"] = click_text("SAT")
+            ok_steps["SAT"]      = click_text("SAT")
             page.wait_for_timeout(1500)
             ok_steps["금월(~오늘)"] = click_text("금월(~오늘)")
             page.wait_for_timeout(1500)
 
-            # 3) Excel(화면) 클릭 + 다운로드
+            # ── 3) Excel(화면) 버튼 클릭 + 다운로드 ──────────────────
             excel_clicked = False
+            excel_selector_used = None
+
             for ctx in [page] + page.frames:
-                try:
-                    loc = ctx.locator("[data-item-key='excel_view_footer_toolbar']")
-                    if loc.count() > 0:
-                        with page.expect_download(timeout=120000) as dlinfo:
-                            loc.first.click(timeout=5000, force=True)
-                        excel_clicked = True
-                        break
-                except Exception:
-                    continue
+                if excel_clicked:
+                    break
+                for sel in EXCEL_SELECTORS:
+                    try:
+                        loc = ctx.locator(sel)
+                        if loc.count() > 0:
+                            with page.expect_download(timeout=120000) as dlinfo:
+                                loc.first.click(timeout=5000, force=True)
+                            excel_clicked = True
+                            excel_selector_used = sel
+                            break
+                    except Exception:
+                        continue
 
             ok_steps["ExcelClick"] = excel_clicked
+            result["excel_selector_used"] = excel_selector_used  # 어떤 셀렉터가 hit됐는지 기록
+
             if not excel_clicked:
+                # 디버그용: 현재 페이지 HTML 일부 및 프레임 URL 저장
+                try:
+                    result["debug_frame_urls"] = [f.url for f in page.frames]
+                    result["debug_page_html"]  = page.content()[:5000]
+                except Exception:
+                    pass
                 raise RuntimeError("Excel(화면) button not found")
 
-            download = dlinfo.value
+            download  = dlinfo.value
             save_path = os.path.join(dl_dir, download.suggested_filename)
             download.save_as(save_path)
             result["downloaded_file"] = save_path
 
-            # 4) 엑셀 검증
-            wb = load_workbook(save_path, data_only=False, read_only=True)
+            # ── 4) 엑셀 검증 ──────────────────────────────────────────
+            wb   = load_workbook(save_path, data_only=False, read_only=True)
             if "판매현황" not in wb.sheetnames:
                 raise RuntimeError(f"sheet '판매현황' not found: {wb.sheetnames}")
 
-            ws = wb["판매현황"]
-            a1 = ws["A1"].value
+            ws   = wb["판매현황"]
+            a1   = ws["A1"].value
             if not isinstance(a1, str) or "회사명" not in a1:
                 raise RuntimeError("A1 meta pattern not found")
 
@@ -272,8 +304,8 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
             for r in range(3, data_end + 1):
                 rows.append([ws.cell(row=r, column=c).value for c in range(1, 11)])
 
-            result["row_count"] = len(rows)
-            result["month_key"] = detect_month_key_from_rows(rows)
+            result["row_count"]  = len(rows)
+            result["month_key"]  = detect_month_key_from_rows(rows)
             browser.close()
 
         return True, result
@@ -324,11 +356,11 @@ def stage_all() -> Dict[str, Any]:
             "timestamp": now_kst_str(),
         }
 
-    month_key = erp_payload.get("month_key", "")
+    month_key       = erp_payload.get("month_key", "")
     downloaded_file = erp_payload.get("downloaded_file", "")
 
     from openpyxl import load_workbook
-    wb = load_workbook(downloaded_file, data_only=False, read_only=True)
+    wb  = load_workbook(downloaded_file, data_only=False, read_only=True)
     src = wb["판매현황"]
     last = src.max_row
     while last >= 3 and (src.cell(row=last, column=1).value in (None, "")):
@@ -343,9 +375,9 @@ def stage_all() -> Dict[str, Any]:
     if not values:
         values = []
     header = values[0] if values else []
-    body = values[1:] if len(values) >= 2 else []
+    body   = values[1:] if len(values) >= 2 else []
 
-    kept = []
+    kept    = []
     deleted = 0
     for r in body:
         a = r[0] if len(r) > 0 else ""
