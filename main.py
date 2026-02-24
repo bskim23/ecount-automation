@@ -225,25 +225,23 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
             ok_steps["금월(~오늘)"] = click_text("금월(~오늘)")
             page.wait_for_timeout(1500)
 
-            # 3) Excel(화면) 클릭
+            # 3) Excel(화면) 클릭 + 다운로드
             excel_clicked = False
             for ctx in [page] + page.frames:
                 try:
                     loc = ctx.locator("[data-item-key='excel_view_footer_toolbar']")
                     if loc.count() > 0:
-                        loc.first.click(timeout=5000, force=True)
+                        with page.expect_download(timeout=120000) as dlinfo:
+                            loc.first.click(timeout=5000, force=True)
                         excel_clicked = True
                         break
                 except Exception:
                     continue
-    
 
             ok_steps["ExcelClick"] = excel_clicked
             if not excel_clicked:
                 raise RuntimeError("Excel(화면) button not found")
 
-            with page.expect_download(timeout=120000) as dlinfo:
-                pass
             download = dlinfo.value
             save_path = os.path.join(dl_dir, download.suggested_filename)
             download.save_as(save_path)
