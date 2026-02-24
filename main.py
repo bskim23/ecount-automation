@@ -1,3 +1,5 @@
+APP_REV = "2026-02-24_02"  # 아무 문자열로 매번 바꾸세요
+
 from flask import Flask, request, jsonify
 import os, json, base64, re, time, datetime
 from typing import Dict, Any, Tuple, List
