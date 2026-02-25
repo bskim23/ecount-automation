@@ -1,4 +1,4 @@
-APP_REV = "2026-02-25_02"
+APP_REV = "2026-02-25_03"
 
 from flask import Flask, request, jsonify
 import os, json, base64, re, datetime
@@ -427,7 +427,10 @@ def stage_all() -> Dict[str, Any]:
     header = all_values[0] if all_values else []
     body   = all_values[1:] if len(all_values) >= 2 else []
 
+    # ★ 구글 시트 trailing 빈 행 제거
+    body = [r for r in body if any(str(c).strip() for c in r)]
     old_data_rows = len(body)
+    print(f"[ALL] body rows after strip empty: {old_data_rows}", flush=True)
 
     # 당월 데이터 제외, 나머지 보존
     kept    = []
@@ -457,8 +460,8 @@ def stage_all() -> Dict[str, Any]:
     # ── K/L/M 수식: 새로 삽입된 당월 행에만 작성 ──
     # kept 행 다음부터 rows 행 끝까지가 당월 신규 데이터 위치
     # 헤더 1행 포함하므로 +2 로 시트 행 번호 계산
-    klm_start_row = len(kept) + 2          # 예: kept=500행 → 시트 502행부터
-    klm_end_row   = len(kept) + 1 + len(rows)  # 예: 500+1+879 = 1380행까지
+    klm_start_row = len(kept) + 2
+    klm_end_row   = len(kept) + 1 + len(rows)
 
     klm_data = [make_klm_formulas(r) for r in range(klm_start_row, klm_end_row + 1)]
     ws.update(
