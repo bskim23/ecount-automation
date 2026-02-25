@@ -1,4 +1,4 @@
-APP_REV = "2026-02-25_01"
+APP_REV = "2026-02-25_02"
 
 from flask import Flask, request, jsonify
 import os, json, base64, re, datetime
@@ -454,26 +454,24 @@ def stage_all() -> Dict[str, Any]:
     ws.update(f"A1:J{len(out)}", out, value_input_option="USER_ENTERED")
     print(f"[ALL] A:J updated: {len(out)} rows", flush=True)
 
-    # ── K/L/M 수식 확장 (새 행이 기존보다 많을 때만) ──
-    extended_klm = 0
-    if new_data_rows > old_data_rows:
-        klm_data = []
-        # 헤더가 1행이므로 데이터는 2행부터 시작
-        for r in range(old_data_rows + 2, new_data_rows + 2):
-            klm_data.append(make_klm_formulas(r))
-        start_row = old_data_rows + 2
-        end_row   = new_data_rows + 1
-        ws.update(
-            f"K{start_row}:M{end_row}",
-            klm_data,
-            value_input_option="USER_ENTERED"
-        )
-        extended_klm = len(klm_data)
-        print(f"[ALL] K:M formulas extended {extended_klm} rows (row {start_row}~{end_row})", flush=True)
+    # ── K/L/M 수식: 새로 삽입된 당월 행에만 작성 ──
+    # kept 행 다음부터 rows 행 끝까지가 당월 신규 데이터 위치
+    # 헤더 1행 포함하므로 +2 로 시트 행 번호 계산
+    klm_start_row = len(kept) + 2          # 예: kept=500행 → 시트 502행부터
+    klm_end_row   = len(kept) + 1 + len(rows)  # 예: 500+1+879 = 1380행까지
+
+    klm_data = [make_klm_formulas(r) for r in range(klm_start_row, klm_end_row + 1)]
+    ws.update(
+        f"K{klm_start_row}:M{klm_end_row}",
+        klm_data,
+        value_input_option="USER_ENTERED"
+    )
+    print(f"[ALL] K:M formulas written: rows {klm_start_row}~{klm_end_row} ({len(klm_data)} rows)", flush=True)
 
     append_log_row(
         log_ws, "all", "OK",
-        f"month={month_key}, deleted={deleted}, inserted={inserted}, klm_extended={extended_klm}"
+        f"month={month_key}, deleted={deleted}, inserted={inserted}, "
+        f"klm_rows={klm_start_row}~{klm_end_row}"
     )
 
     return {
@@ -482,7 +480,8 @@ def stage_all() -> Dict[str, Any]:
         "month_key": month_key,
         "deleted_rows_in_month": deleted,
         "inserted_rows": inserted,
-        "klm_formulas_extended": extended_klm,
+        "klm_start_row": klm_start_row,
+        "klm_end_row": klm_end_row,
         "target_sheet": ws.title,
         "log_sheet": log_ws.title,
         "timestamp": now_kst_str(),
