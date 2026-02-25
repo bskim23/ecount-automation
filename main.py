@@ -1,4 +1,4 @@
-APP_REV = "2026-02-24_25"
+APP_REV = "2026-02-25_01"
 
 from flask import Flask, request, jsonify
 import os, json, base64, re, datetime
@@ -130,6 +130,25 @@ EXPECTED_HEADERS = [
 
 EXCEL_SEL = "[data-item-key='excel_view_footer_toolbar']"
 
+
+def make_klm_formulas(row: int) -> List[str]:
+    """행 번호를 받아 K, L, M 수식 문자열 반환"""
+    k = f'=LEFT(A{row},10)'
+    l = f'=IFERROR(DATEVALUE(TEXT(K{row},"yyyy-mm-dd")),)'
+    m = (
+        f'=IF(ISNUMBER(SEARCH("오스모",B{row})),"오스모타이트",'
+        f'IF(ISNUMBER(SEARCH("롤링",B{row})),"롤링핑거",'
+        f'IF(ISNUMBER(SEARCH("허브",B{row})),"허브온팩",'
+        f'IF(ISNUMBER(SEARCH("허리",B{row})),"허리온팩",'
+        f'IF(ISNUMBER(SEARCH("아이온",B{row})),"아이온팩",'
+        f'IF(ISNUMBER(SEARCH("블랙홀",B{row})),"블랙홀파스",'
+        f'IF(ISNUMBER(SEARCH("스키놀로",B{row})),"스키놀로지",'
+        f'IF(ISNUMBER(SEARCH("스윙",B{row})),"스윙",'
+        f'IF(ISNUMBER(SEARCH("다리",B{row})),"다리피팅","기타")))))))))'
+    )
+    return [k, l, m]
+
+
 def detect_month_key_from_rows(rows: List[List[Any]]) -> str:
     for r in rows:
         if not r or len(r) < 1:
@@ -145,7 +164,7 @@ def detect_month_key_from_rows(rows: List[List[Any]]) -> str:
 def read_xlsx_rows(path: str) -> Tuple[List[List[Any]], str]:
     """
     엑셀 파일에서 판매현황 시트의 데이터 행을 읽어 반환.
-    ★ read_only=True + iter_rows(values_only=True) 로 랜덤 접근 없이 스트리밍 처리.
+    read_only=True + iter_rows(values_only=True) 스트리밍 처리.
     반환: (rows, month_key)
     """
     from openpyxl import load_workbook
@@ -157,8 +176,6 @@ def read_xlsx_rows(path: str) -> Tuple[List[List[Any]], str]:
 
     ws = wb["판매현황"]
 
-    # 헤더 검증 (row 1 = 회사명 메타, row 2 = 컬럼헤더)
-    # read_only iter_rows로 앞 2행만 확인
     meta_row = None
     header_row = None
     for i, row in enumerate(ws.iter_rows(min_row=1, max_row=2, min_col=1, max_col=10, values_only=True)):
@@ -174,25 +191,20 @@ def read_xlsx_rows(path: str) -> Tuple[List[List[Any]], str]:
     if header_row != EXPECTED_HEADERS:
         raise RuntimeError(f"header mismatch: {header_row}")
 
-    # 데이터 행 전체 읽기 (row 3~끝)
-    # iter_rows는 스트리밍이므로 한 번에 리스트로 수집
     all_rows = [
         list(r)
         for r in ws.iter_rows(min_row=3, min_col=1, max_col=10, values_only=True)
     ]
 
-    # 뒤에서 빈 행 제거
     while all_rows and all_rows[-1][0] in (None, ""):
         all_rows.pop()
 
-    # 마지막 3행은 합계/소계 행 → 제외
     rows = all_rows[:-3] if len(all_rows) > 3 else []
 
     if not rows:
         raise RuntimeError("no data rows after excluding last 3 summary rows")
 
     month_key = detect_month_key_from_rows(rows)
-
     wb.close()
     return rows, month_key
 
@@ -291,10 +303,9 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
             print("[ERP] clicking 금월(~오늘)...", flush=True)
             ok_steps["금월(~오늘)"] = click_text("금월(~오늘)")
 
-            # Excel 버튼이 DOM에 나타날 때까지 최대 15초 폴링
             print("[ERP] polling for Excel button (max 15s)...", flush=True)
             excel_ctx = None
-            for i in range(30):  # 0.5s × 30 = 15s
+            for i in range(30):
                 page.wait_for_timeout(500)
                 for ctx in [page] + page.frames:
                     try:
@@ -347,7 +358,7 @@ def ecount_download_and_validate() -> Tuple[bool, Dict[str, Any]]:
 
             browser.close()
 
-        # 4) 엑셀 검증 ── 브라우저 닫은 뒤 처리 (iter_rows 스트리밍)
+        # 4) 엑셀 검증 (브라우저 닫은 후)
         print("[ERP] loading workbook (iter_rows)...", flush=True)
         rows, month_key = read_xlsx_rows(save_path)
         print(f"[ERP] workbook parsed: {len(rows)} rows, month={month_key}", flush=True)
@@ -407,17 +418,18 @@ def stage_all() -> Dict[str, Any]:
     month_key       = erp_payload.get("month_key", "")
     downloaded_file = erp_payload.get("downloaded_file", "")
 
-    # ★ read_xlsx_rows 재사용 (이미 validate에서 검증 완료)
     print("[ALL] re-reading xlsx rows for sheet update...", flush=True)
     rows, _ = read_xlsx_rows(downloaded_file)
     inserted = len(rows)
 
-    values = ws.get_all_values()
-    if not values:
-        values = []
-    header = values[0] if values else []
-    body   = values[1:] if len(values) >= 2 else []
+    # ── A:J 만 읽기 (K/L/M 수식 컬럼 건드리지 않음) ──
+    all_values = ws.get("A:J") or []
+    header = all_values[0] if all_values else []
+    body   = all_values[1:] if len(all_values) >= 2 else []
 
+    old_data_rows = len(body)
+
+    # 당월 데이터 제외, 나머지 보존
     kept    = []
     deleted = 0
     for r in body:
@@ -427,16 +439,42 @@ def stage_all() -> Dict[str, Any]:
         else:
             kept.append(r)
 
-    new_body = kept + rows
-    ws.clear()
+    new_body      = kept + rows
+    new_data_rows = len(new_body)
 
+    # ── A:J 데이터 영역 클리어 (2행~기존마지막행) ──
+    if old_data_rows > 0:
+        ws.batch_clear([f"A2:J{old_data_rows + 1}"])
+
+    # ── A:J 헤더 + 데이터 쓰기 ──
     out = []
     if header:
-        out.append(header)
+        out.append(header[:10])
     out.extend(new_body)
-    ws.update("A1", out, value_input_option="USER_ENTERED")
+    ws.update(f"A1:J{len(out)}", out, value_input_option="USER_ENTERED")
+    print(f"[ALL] A:J updated: {len(out)} rows", flush=True)
 
-    append_log_row(log_ws, "all", "OK", f"month={month_key}, deleted={deleted}, inserted={inserted}")
+    # ── K/L/M 수식 확장 (새 행이 기존보다 많을 때만) ──
+    extended_klm = 0
+    if new_data_rows > old_data_rows:
+        klm_data = []
+        # 헤더가 1행이므로 데이터는 2행부터 시작
+        for r in range(old_data_rows + 2, new_data_rows + 2):
+            klm_data.append(make_klm_formulas(r))
+        start_row = old_data_rows + 2
+        end_row   = new_data_rows + 1
+        ws.update(
+            f"K{start_row}:M{end_row}",
+            klm_data,
+            value_input_option="USER_ENTERED"
+        )
+        extended_klm = len(klm_data)
+        print(f"[ALL] K:M formulas extended {extended_klm} rows (row {start_row}~{end_row})", flush=True)
+
+    append_log_row(
+        log_ws, "all", "OK",
+        f"month={month_key}, deleted={deleted}, inserted={inserted}, klm_extended={extended_klm}"
+    )
 
     return {
         "stage": "all",
@@ -444,6 +482,7 @@ def stage_all() -> Dict[str, Any]:
         "month_key": month_key,
         "deleted_rows_in_month": deleted,
         "inserted_rows": inserted,
+        "klm_formulas_extended": extended_klm,
         "target_sheet": ws.title,
         "log_sheet": log_ws.title,
         "timestamp": now_kst_str(),
